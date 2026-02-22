@@ -3,19 +3,18 @@ package data
 import (
 	"context"
 	"fmt"
-	"io"
-	logger3 "log"
 	"time"
 
 	"github.com/IBM/sarama"
 	"github.com/asynccnu/ccnubox-be/be-classlist/internal/conf"
 	"github.com/asynccnu/ccnubox-be/be-classlist/internal/data/do"
-	"github.com/go-kratos/kratos/v2/log"
 	"github.com/google/wire"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
-	logger2 "gorm.io/gorm/logger"
+
+	"github.com/asynccnu/ccnubox-be/common/pkg/logger"
+	glog "gorm.io/gorm/logger"
 )
 
 // ProviderSet is data providers.
@@ -36,6 +35,9 @@ var ProviderSet = wire.NewSet(
 	NewClassInfoRepo,
 	NewStudentAndCourseRepo,
 	NewClassRepo,
+	NewLogger,
+	NewKratosLogger,
+	NewGromLogger,
 )
 
 type Transaction interface {
@@ -50,9 +52,9 @@ type Data struct {
 }
 
 // NewData .
-func NewData(c *conf.Data, mysqlDB *gorm.DB, logger log.Logger) (*Data, func(), error) {
+func NewData(c *conf.Data, mysqlDB *gorm.DB, logger logger.Logger) (*Data, func(), error) {
 	cleanup := func() {
-		log.NewHelper(logger).Info("closing the data resources")
+		logger.Info("closing the data resources")
 	}
 	return &Data{
 		Mysql: mysqlDB,
@@ -60,34 +62,8 @@ func NewData(c *conf.Data, mysqlDB *gorm.DB, logger log.Logger) (*Data, func(), 
 }
 
 // NewDB 连接mysql数据库
-func NewDB(c *conf.Data, logfile io.Writer, logger log.Logger) *gorm.DB {
-
-	var logLevel map[string]logger2.LogLevel
-	logLevel = map[string]logger2.LogLevel{
-		"info":  logger2.Info,
-		"warn":  logger2.Warn,
-		"error": logger2.Error,
-	}
-
-	level, ok := logLevel[c.Database.LogLevel]
-	if !ok {
-		level = logger2.Warn
-	}
-
-	//注意:
-	//这个logfile 最好别在此处声明,最好在main函数中声明,在程序结束时关闭
-	//否则你只能在下面的db.AutoMigrate得到相关日志
-	newlogger := logger2.New(
-		//日志写入文件
-		logger3.New(logfile, "\r\n", logger3.LstdFlags),
-		logger2.Config{
-			SlowThreshold: time.Second,
-			LogLevel:      level,
-			Colorful:      false,
-		},
-	)
-
-	db, err := gorm.Open(mysql.Open(c.Database.Source), &gorm.Config{Logger: newlogger})
+func NewDB(c *conf.Data, logger logger.Logger, glogger glog.Interface) *gorm.DB {
+	db, err := gorm.Open(mysql.Open(c.Database.Source), &gorm.Config{Logger: glogger})
 	if err != nil {
 		panic(fmt.Sprintf("connect mysql failed:%v", err))
 	}
@@ -100,13 +76,13 @@ func NewDB(c *conf.Data, logfile io.Writer, logger log.Logger) *gorm.DB {
 		panic(fmt.Sprintf("mysql auto migrate failed:%v", err))
 	}
 
-	log.NewHelper(logger).Info("mysql connect success")
+	logger.Info("mysql connect success")
 
 	return db
 }
 
 // NewRedisDB 连接redis
-func NewRedisDB(c *conf.Data, logger log.Logger) *redis.Client {
+func NewRedisDB(c *conf.Data, logger logger.Logger) *redis.Client {
 	rdb := redis.NewClient(&redis.Options{
 		Addr:         c.Redis.Addr,
 		ReadTimeout:  time.Duration(c.Redis.ReadTimeout) * time.Millisecond,
@@ -118,12 +94,17 @@ func NewRedisDB(c *conf.Data, logger log.Logger) *redis.Client {
 	if err != nil {
 		panic(fmt.Sprintf("connect redis err:%v", err))
 	}
-	log.NewHelper(logger).Info("redis connect success")
+	logger.Info("redis connect success")
 	return rdb
 }
 
-func initProducerConfig() *sarama.Config {
+func initProducerConfig(username, password string) *sarama.Config {
 	producerConfig := sarama.NewConfig()
+	producerConfig.Net.SASL.Enable = true
+	producerConfig.Net.SASL.User = username
+	producerConfig.Net.SASL.Password = password
+	producerConfig.Net.SASL.Mechanism = sarama.SASLTypePlaintext
+
 	producerConfig.Producer.Return.Errors = true
 	producerConfig.Producer.Return.Successes = true
 	producerConfig.Producer.Partitioner = sarama.NewHashPartitioner
@@ -136,8 +117,13 @@ func initProducerConfig() *sarama.Config {
 	return producerConfig
 }
 
-func initConsumerConfig() *sarama.Config {
+func initConsumerConfig(username, password string) *sarama.Config {
 	consumerConfig := sarama.NewConfig()
+	consumerConfig.Net.SASL.Enable = true
+	consumerConfig.Net.SASL.User = username
+	consumerConfig.Net.SASL.Password = password
+	consumerConfig.Net.SASL.Mechanism = sarama.SASLTypePlaintext
+
 	consumerConfig.Consumer.Offsets.Initial = sarama.OffsetOldest
 	consumerConfig.Consumer.Group.Session.Timeout = 10 * time.Second
 	consumerConfig.Consumer.Group.Heartbeat.Interval = 3 * time.Second
@@ -145,17 +131,21 @@ func initConsumerConfig() *sarama.Config {
 }
 
 type KafkaProducerBuilder struct {
-	brokers []string
+	brokers  []string
+	username string
+	password string
 }
 
 func NewKafkaProducerBuilder(c *conf.Data) *KafkaProducerBuilder {
 	return &KafkaProducerBuilder{
-		brokers: c.Kafka.Brokers,
+		brokers:  c.Kafka.Brokers,
+		username: c.Kafka.Username,
+		password: c.Kafka.Password,
 	}
 }
 
 func (pb KafkaProducerBuilder) Build() (sarama.SyncProducer, error) {
-	producerConfig := initProducerConfig()
+	producerConfig := initProducerConfig(pb.username, pb.password)
 	p, err := sarama.NewSyncProducer(pb.brokers, producerConfig)
 	if err != nil {
 		return nil, fmt.Errorf("kafka producer connect failed: %w", err)
@@ -164,17 +154,21 @@ func (pb KafkaProducerBuilder) Build() (sarama.SyncProducer, error) {
 }
 
 type KafkaConsumerBuilder struct {
-	brokers []string
+	brokers  []string
+	username string
+	password string
 }
 
 func NewKafkaConsumerBuilder(c *conf.Data) *KafkaConsumerBuilder {
 	return &KafkaConsumerBuilder{
-		brokers: c.Kafka.Brokers,
+		brokers:  c.Kafka.Brokers,
+		username: c.Kafka.Username,
+		password: c.Kafka.Password,
 	}
 }
 
 func (cb KafkaConsumerBuilder) Build(groupID string) (sarama.ConsumerGroup, error) {
-	consumerConfig := initConsumerConfig()
+	consumerConfig := initConsumerConfig(cb.username, cb.password)
 	consumerGroup, err := sarama.NewConsumerGroup(cb.brokers, groupID, consumerConfig)
 	if err != nil {
 		return nil, fmt.Errorf("kafka consumer connect failed: %w", err)
