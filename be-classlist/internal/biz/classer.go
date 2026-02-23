@@ -12,8 +12,8 @@ import (
 	"github.com/asynccnu/ccnubox-be/be-classlist/internal/conf"
 	"github.com/asynccnu/ccnubox-be/be-classlist/internal/data/do"
 	"github.com/asynccnu/ccnubox-be/be-classlist/internal/errcode"
-	"github.com/asynccnu/ccnubox-be/common/tool"
 	"github.com/asynccnu/ccnubox-be/common/pkg/logger"
+	"github.com/asynccnu/ccnubox-be/common/tool"
 	"github.com/panjf2000/ants/v2"
 )
 
@@ -95,10 +95,10 @@ func (cluc *ClassUsecase) GetClasses(ctx context.Context, stuID, year, semester 
 
 	var wg sync.WaitGroup
 
-	waitCrawTime := cluc.waitCrawTime
-	forceNoRefresh := false // 强制不刷新
-	getLocal := false       // 是否从本地获取到数据
-	count := -1             // 统计获取的成绩是否为空
+	waitCrawTime := cluc.waitCrawTime // 等待爬虫的时间
+	forceNoRefresh := false           // 强制不刷新
+	getLocal := false                 // 是否从本地获取到数据
+	count := -1                       // 统计获取的成绩是否为空
 
 Local: // 从本地获取数据
 
@@ -116,7 +116,7 @@ Local: // 从本地获取数据
 		// 我们只处理数据库中没有数据的情况
 		// 此时大概率是第一次请求,我们要将等待时间调长
 		if errors.Is(err, errcode.ErrClassNotFound) {
-			waitCrawTime = max(waitCrawTime, 7*time.Second+500*time.Millisecond)
+			waitCrawTime = max(waitCrawTime, 30*time.Second)
 		}
 	}
 
