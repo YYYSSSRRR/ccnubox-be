@@ -12,8 +12,8 @@ import (
 	"github.com/asynccnu/ccnubox-be/be-classlist/internal/conf"
 	"github.com/asynccnu/ccnubox-be/be-classlist/internal/data/do"
 	"github.com/asynccnu/ccnubox-be/be-classlist/internal/errcode"
-	"github.com/asynccnu/ccnubox-be/common/tool"
 	"github.com/asynccnu/ccnubox-be/common/pkg/logger"
+	"github.com/asynccnu/ccnubox-be/common/tool"
 	"github.com/panjf2000/ants/v2"
 )
 
@@ -32,6 +32,8 @@ type ClassUsecase struct {
 	gpool *ants.Pool
 	// rndPool 用于生成随机数，避免每次都创建新的rand对象,同时保证并发安全
 	rndPool sync.Pool
+
+	cronTask *CronTaskExecute
 }
 
 func (cluc *ClassUsecase) Close() {
@@ -39,11 +41,15 @@ func (cluc *ClassUsecase) Close() {
 		cluc.gpool.Release()
 		logger.GlobalLogger.Info("ClassUsecase goroutine pool released")
 	}
+	if cluc.cronTask != nil {
+		cluc.cronTask.Stop()
+		logger.GlobalLogger.Info("Cron task stopped")
+	}
 }
 
 func NewClassUsecase(classRepo ClassRepo, crawler ClassCrawler,
 	JxbRepo JxbRepo, Cs CCNUServiceProxy, delayQue DelayQueue, refreshLog RefreshLogRepo,
-	cf *conf.Server,
+	cf *conf.Server,cronTask *CronTaskExecute,
 ) (*ClassUsecase, func()) {
 	waitCrawTime := 1200 * time.Millisecond
 	waitUserSvcTime := 10000 * time.Millisecond
@@ -73,6 +79,7 @@ func NewClassUsecase(classRepo ClassRepo, crawler ClassCrawler,
 				return rand.New(rand.NewSource(time.Now().UnixNano()))
 			},
 		},
+		cronTask: cronTask,
 	}
 	// 开启一个协程来处理重试消息
 	go func() {
@@ -95,10 +102,10 @@ func (cluc *ClassUsecase) GetClasses(ctx context.Context, stuID, year, semester 
 
 	var wg sync.WaitGroup
 
-	waitCrawTime := cluc.waitCrawTime
-	forceNoRefresh := false // 强制不刷新
-	getLocal := false       // 是否从本地获取到数据
-	count := -1             // 统计获取的成绩是否为空
+	waitCrawTime := cluc.waitCrawTime // 等待爬虫的时间
+	forceNoRefresh := false           // 强制不刷新
+	getLocal := false                 // 是否从本地获取到数据
+	count := -1                       // 统计获取的成绩是否为空
 
 Local: // 从本地获取数据
 
@@ -116,7 +123,7 @@ Local: // 从本地获取数据
 		// 我们只处理数据库中没有数据的情况
 		// 此时大概率是第一次请求,我们要将等待时间调长
 		if errors.Is(err, errcode.ErrClassNotFound) {
-			waitCrawTime = max(waitCrawTime, 7*time.Second+500*time.Millisecond)
+			waitCrawTime = max(waitCrawTime, 30*time.Second)
 		}
 	}
 
@@ -640,26 +647,4 @@ func (cluc *ClassUsecase) UpdateClassNote(ctx context.Context, stuID, year, seme
 	return nil
 }
 
-// Student 学生接口
-type Student interface {
-	GetClass(ctx context.Context, stuID, year, semester, cookie string, craw ClassCrawler) ([]*ClassInfo, []*StudentCourse, int, error)
-}
-type Undergraduate struct{}
 
-func (u *Undergraduate) GetClass(ctx context.Context, stuID, year, semester, cookie string, craw ClassCrawler) ([]*ClassInfo, []*StudentCourse, int, error) {
-	infos, scs, sum, err := craw.GetClassInfosForUndergraduate(ctx, stuID, year, semester, cookie)
-	if err != nil {
-		return nil, nil, -1, err
-	}
-	return infos, scs, sum, nil
-}
-
-type GraduateStudent struct{}
-
-func (g *GraduateStudent) GetClass(ctx context.Context, stuID, year, semester, cookie string, craw ClassCrawler) ([]*ClassInfo, []*StudentCourse, int, error) {
-	infos, scs, sum, err := craw.GetClassInfoForGraduateStudent(ctx, stuID, year, semester, cookie)
-	if err != nil {
-		return nil, nil, -1, err
-	}
-	return infos, scs, sum, nil
-}
